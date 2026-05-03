@@ -1,8 +1,9 @@
 import { motion } from 'framer-motion'
 
+// Use raw hex strings so we can compose them with hex-alpha suffixes (e.g. `${color}1f`).
 const PROMISES = [
   {
-    color: 'var(--color-terracotta)',
+    color: '#C76B4A', // Terracotta
     icon: (
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
         <rect x="3" y="11" width="18" height="11" rx="2" />
@@ -13,7 +14,7 @@ const PROMISES = [
     body: 'Kin only stores who is in which family. Your photos, captions, comments and likes never leave the device.',
   },
   {
-    color: 'var(--color-washi)',
+    color: '#D4A574', // WashiTan
     icon: (
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
         <path d="M3 8h18" />
@@ -26,7 +27,7 @@ const PROMISES = [
     body: 'Calm. Quiet. No suggested follows. No "for you" feed. No third-party tracking.',
   },
   {
-    color: 'var(--color-sage)',
+    color: '#7A8E66', // SageMist deep — slightly darker for icon contrast
     icon: (
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
         <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
@@ -39,7 +40,7 @@ const PROMISES = [
     body: 'Each circle is invite-only via a 16-character code. Outsiders cannot stumble in — even by accident.',
   },
   {
-    color: 'var(--color-terracotta-deep)',
+    color: '#A04E33', // TerracottaDeep
     icon: (
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
         <path d="M12 2 4 6v6c0 5 3.4 9 8 10 4.6-1 8-5 8-10V6l-8-4Z" />
