@@ -1,3 +1,6 @@
 node_modules
 .env
 .expo
+landing/dist
+landing/node_modules
+landing/.vite
