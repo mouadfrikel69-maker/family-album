@@ -1,3 +1,5 @@
+import { useId } from "react";
+
 type Props = {
   seed: string;
   className?: string;
@@ -32,6 +34,13 @@ const SCENES = [
 ];
 
 export default function PhotoTile({ seed, className = "", style }: Props) {
+  // useId gives each instance a stable, document-unique id, so the gradient
+  // refs below never collide with other PhotoTile instances on the page.
+  const uid = useId().replace(/:/g, "_");
+  const skyId = `sky-${uid}`;
+  const groundId = `ground-${uid}`;
+  const vignetteId = `vignette-${uid}`;
+
   const h = hash(seed);
   const palette = pick(h, SCENES);
   const horizon = 38 + (h % 22);
@@ -49,17 +58,21 @@ export default function PhotoTile({ seed, className = "", style }: Props) {
       aria-hidden
     >
       <defs>
-        <linearGradient id={`sky-${seed}`} x1="0" y1="0" x2="0" y2="1">
+        <linearGradient id={skyId} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={palette[0]} />
           <stop offset="100%" stopColor={palette[1]} />
         </linearGradient>
-        <linearGradient id={`ground-${seed}`} x1="0" y1="0" x2="0" y2="1">
+        <linearGradient id={groundId} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={palette[2]} />
           <stop offset="100%" stopColor={palette[3]} />
         </linearGradient>
+        <radialGradient id={vignetteId}>
+          <stop offset="60%" stopColor="transparent" />
+          <stop offset="100%" stopColor="#3D2E26" />
+        </radialGradient>
       </defs>
-      <rect x="0" y="0" width="100" height={horizon} fill={`url(#sky-${seed})`} />
-      <rect x="0" y={horizon} width="100" height={100 - horizon} fill={`url(#ground-${seed})`} />
+      <rect x="0" y="0" width="100" height={horizon} fill={`url(#${skyId})`} />
+      <rect x="0" y={horizon} width="100" height={100 - horizon} fill={`url(#${groundId})`} />
       <circle cx={sunCx} cy={horizon - sunR + 2} r={sunR} fill={palette[1]} opacity="0.85" />
       <circle cx={sunCx} cy={horizon - sunR + 2} r={sunR * 0.55} fill={palette[0]} opacity="0.9" />
       {/* hills/stripes */}
@@ -80,19 +93,14 @@ export default function PhotoTile({ seed, className = "", style }: Props) {
         <rect x="-1" y="-10" width="2" height="10" fill={palette[3]} opacity="0.55" />
         <circle cx="0" cy="-12" r="2" fill={palette[3]} opacity="0.55" />
       </g>
-      {/* warm vignette */}
       <rect
         x="0"
         y="0"
         width="100"
         height="100"
-        fill="url(#vignette)"
+        fill={`url(#${vignetteId})`}
         opacity="0.18"
       />
-      <radialGradient id="vignette">
-        <stop offset="60%" stopColor="transparent" />
-        <stop offset="100%" stopColor="#3D2E26" />
-      </radialGradient>
     </svg>
   );
 }
