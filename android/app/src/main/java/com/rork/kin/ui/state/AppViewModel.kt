@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.rork.kin.data.Album
+import com.rork.kin.data.AuthRateLimiter
 import com.rork.kin.data.Comment
 import com.rork.kin.data.Family
 import com.rork.kin.data.FamilyRepository
@@ -95,28 +96,48 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Real Supabase auth — email + password. Returns null on success, error message otherwise. */
     suspend fun signInWithPassword(email: String, password: String): String? {
+        val ctx = getApplication<Application>()
         val cleanEmail = Validate.email(email) ?: return "Enter a valid email"
-        val cleanPass = Validate.password(password) ?: return "Password is too short"
+        val cleanPass = Validate.password(password)
+            ?: return Validate.passwordError(password) ?: "Password is invalid"
+        // Throttle credential stuffing per-account.
+        val lockoutMs = AuthRateLimiter.lockoutRemainingMs(ctx, cleanEmail)
+        if (lockoutMs > 0) {
+            return "Too many attempts. Try again in ${AuthRateLimiter.formatRemaining(lockoutMs)}."
+        }
         if (!SupabaseAuth.isConfigured) {
             // Local-only mode — keep app usable without a Supabase project.
             _state.update { it.copy(authed = true) }
             return null
         }
-        return when (val r = SupabaseAuth.signIn(getApplication(), cleanEmail, cleanPass)) {
-            is SupabaseAuth.AuthResult.Ok -> { _state.update { it.copy(authed = true) }; null }
-            is SupabaseAuth.AuthResult.Error -> r.message
+        return when (val r = SupabaseAuth.signIn(ctx, cleanEmail, cleanPass)) {
+            is SupabaseAuth.AuthResult.Ok -> {
+                AuthRateLimiter.recordSuccess(ctx, cleanEmail)
+                _state.update { it.copy(authed = true) }
+                null
+            }
+            is SupabaseAuth.AuthResult.Error -> {
+                AuthRateLimiter.recordFailure(ctx, cleanEmail)
+                r.message
+            }
         }
     }
 
     suspend fun signUpWithPassword(email: String, password: String): String? {
+        val ctx = getApplication<Application>()
         val cleanEmail = Validate.email(email) ?: return "Enter a valid email"
-        val cleanPass = Validate.password(password) ?: return "Password must be 8+ characters"
+        val cleanPass = Validate.password(password)
+            ?: return Validate.passwordError(password) ?: "Password must be 8+ characters with a letter and a number"
         if (!SupabaseAuth.isConfigured) {
             _state.update { it.copy(authed = true) }
             return null
         }
-        return when (val r = SupabaseAuth.signUp(getApplication(), cleanEmail, cleanPass)) {
-            is SupabaseAuth.AuthResult.Ok -> { _state.update { it.copy(authed = true) }; null }
+        return when (val r = SupabaseAuth.signUp(ctx, cleanEmail, cleanPass)) {
+            is SupabaseAuth.AuthResult.Ok -> {
+                AuthRateLimiter.recordSuccess(ctx, cleanEmail)
+                _state.update { it.copy(authed = true) }
+                null
+            }
             is SupabaseAuth.AuthResult.Error -> r.message
         }
     }
