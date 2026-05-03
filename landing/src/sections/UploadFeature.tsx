@@ -4,11 +4,16 @@ import UploadScreen from "../kin/screens/UploadScreen";
 import { FeatureSection } from "./FeatureSection";
 
 const CAPTION = "first bike ride 🚲";
-const typingFrames: Frame[] = CAPTION.split("").map((_, i) => ({
-  key: `caption-${i}`,
-  hold: 90 + (CAPTION[i] === " " ? 60 : 0),
-  render: () => <UploadScreen caption={CAPTION.slice(0, i + 1)} progress={0} />,
-}));
+// Split by code points so emoji surrogate pairs (e.g. 🚲) stay intact while typing.
+const CAPTION_GLYPHS = [...CAPTION];
+const typingFrames: Frame[] = CAPTION_GLYPHS.map((glyph, i) => {
+  const visible = CAPTION_GLYPHS.slice(0, i + 1).join("");
+  return {
+    key: `caption-${i}`,
+    hold: 90 + (glyph === " " ? 60 : 0),
+    render: () => <UploadScreen caption={visible} progress={0} />,
+  };
+});
 
 const progressFrames: Frame[] = [0.25, 0.55, 0.8, 1].map((p) => ({
   key: `progress-${p}`,
