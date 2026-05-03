@@ -13,8 +13,11 @@ import com.rork.kin.data.Member
 import com.rork.kin.data.Notification
 import com.rork.kin.data.Photo
 import com.rork.kin.data.Role
+import com.rork.kin.data.SecureStore
 import com.rork.kin.data.StoredPhoto
+import com.rork.kin.data.SupabaseAuth
 import com.rork.kin.data.SupabaseSync
+import com.rork.kin.data.Validate
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -57,7 +60,27 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         viewModelScope.launch {
-            val saved = LocalPhotoStore.loadAll(getApplication())
+            val ctx = getApplication<Application>()
+            // Restore encrypted session, if any.
+            val restored = SupabaseAuth.restore(ctx)
+            val savedCode = SecureStore.get(ctx, SecureStore.KEY_INVITE_CODE).orEmpty()
+            val savedFamilyName = SecureStore.get(ctx, SecureStore.KEY_FAMILY_NAME).orEmpty()
+            if (restored != null) {
+                _state.update {
+                    it.copy(
+                        authed = true,
+                        inviteCode = savedCode,
+                        inFamily = savedCode.isNotBlank(),
+                        family = if (savedCode.isNotBlank()) Family(
+                            id = SecureStore.get(ctx, SecureStore.KEY_FAMILY_ID) ?: "fam_local",
+                            name = savedFamilyName.ifBlank { "Your family" },
+                            inviteCode = savedCode,
+                            createdAt = LocalDate.now(),
+                        ) else null,
+                    )
+                }
+            }
+            val saved = LocalPhotoStore.loadAll(ctx)
             storedPhotos.value = saved
             if (saved.isNotEmpty()) {
                 _state.update { it.copy(photos = saved.map(LocalPhotoStore::toPhoto)) }
@@ -66,12 +89,42 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun completeOnboarding() = _state.update { it.copy(onboarded = true) }
+
+    /** Local-only sign-in flag (kept for screens not yet wired to real auth). */
     fun signIn() = _state.update { it.copy(authed = true) }
+
+    /** Real Supabase auth — email + password. Returns null on success, error message otherwise. */
+    suspend fun signInWithPassword(email: String, password: String): String? {
+        val cleanEmail = Validate.email(email) ?: return "Enter a valid email"
+        val cleanPass = Validate.password(password) ?: return "Password is too short"
+        if (!SupabaseAuth.isConfigured) {
+            // Local-only mode — keep app usable without a Supabase project.
+            _state.update { it.copy(authed = true) }
+            return null
+        }
+        return when (val r = SupabaseAuth.signIn(getApplication(), cleanEmail, cleanPass)) {
+            is SupabaseAuth.AuthResult.Ok -> { _state.update { it.copy(authed = true) }; null }
+            is SupabaseAuth.AuthResult.Error -> r.message
+        }
+    }
+
+    suspend fun signUpWithPassword(email: String, password: String): String? {
+        val cleanEmail = Validate.email(email) ?: return "Enter a valid email"
+        val cleanPass = Validate.password(password) ?: return "Password must be 8+ characters"
+        if (!SupabaseAuth.isConfigured) {
+            _state.update { it.copy(authed = true) }
+            return null
+        }
+        return when (val r = SupabaseAuth.signUp(getApplication(), cleanEmail, cleanPass)) {
+            is SupabaseAuth.AuthResult.Ok -> { _state.update { it.copy(authed = true) }; null }
+            is SupabaseAuth.AuthResult.Error -> r.message
+        }
+    }
 
     /** Save the user's profile from the setup screen. Always Admin to start. */
     fun setProfile(name: String, relationship: String, avatarUri: String? = null) {
-        val cleanName = name.trim().ifBlank { "You" }
-        val cleanRel = relationship.trim()
+        val cleanName = Validate.name(name).ifBlank { "You" }
+        val cleanRel = Validate.name(relationship, max = Validate.MAX_RELATIONSHIP)
         val initials = cleanName
             .split(" ")
             .filter { it.isNotBlank() }
@@ -88,6 +141,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             role = Role.Admin,
         )
         FamilyRepository.currentUser = me
+        val ctx = getApplication<Application>()
+        SecureStore.put(ctx, SecureStore.KEY_PROFILE_NAME, cleanName)
+        SecureStore.put(ctx, SecureStore.KEY_PROFILE_REL, cleanRel)
+        SecureStore.put(ctx, SecureStore.KEY_PROFILE_INITIALS, initials)
+        SecureStore.put(ctx, SecureStore.KEY_PROFILE_COLOR, color.toString())
         _state.update {
             it.copy(
                 profileReady = true,
@@ -102,8 +160,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun updateProfile(name: String, relationship: String) = setProfile(name, relationship)
 
     fun createFamily(name: String) {
-        val cleanName = name.trim().ifBlank { "Our family" }
-        val code = generateInviteCode(cleanName)
+        val cleanName = Validate.name(name, max = Validate.MAX_FAMILY_NAME).ifBlank { "Our family" }
+        val code = Validate.newInviteCode()
         val fam = Family(
             id = "fam_${UUID.randomUUID()}",
             name = cleanName,
@@ -111,6 +169,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             createdAt = LocalDate.now(),
         )
         FamilyRepository.family = fam
+        val ctx = getApplication<Application>()
+        SecureStore.put(ctx, SecureStore.KEY_INVITE_CODE, code)
+        SecureStore.put(ctx, SecureStore.KEY_FAMILY_ID, fam.id)
+        SecureStore.put(ctx, SecureStore.KEY_FAMILY_NAME, cleanName)
         val me = _state.value.currentUser
         _state.update {
             it.copy(
@@ -124,7 +186,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun joinFamily(code: String? = null) {
-        val cleaned = code?.trim()?.uppercase()?.takeIf { it.isNotBlank() } ?: ""
+        // Accept lightly-formatted codes; Validate enforces the strict shape.
+        val cleaned = code?.let { Validate.inviteCode(it) }
+            ?: code?.trim()?.uppercase()?.replace(" ", "")
+            ?: ""
         val fam = Family(
             id = "fam_join_${UUID.randomUUID()}",
             name = "Your family",
@@ -132,6 +197,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             createdAt = LocalDate.now(),
         )
         FamilyRepository.family = fam
+        val ctx = getApplication<Application>()
+        SecureStore.put(ctx, SecureStore.KEY_INVITE_CODE, cleaned)
+        SecureStore.put(ctx, SecureStore.KEY_FAMILY_ID, fam.id)
+        SecureStore.put(ctx, SecureStore.KEY_FAMILY_NAME, fam.name)
         val me = _state.value.currentUser
         _state.update {
             it.copy(
@@ -144,18 +213,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         syncFromRemote()
     }
 
-    private fun generateInviteCode(familyName: String): String {
-        val prefix = familyName
-            .uppercase()
-            .filter { it.isLetter() }
-            .take(5)
-            .ifBlank { "FAM" }
-        val year = LocalDate.now().year
-        return "$prefix-$year"
-    }
-
     fun signOut() {
-        _state.update { AppState() }
+        viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            SupabaseAuth.signOut(ctx)
+            SecureStore.clear(ctx)
+            _state.update { AppState() }
+        }
     }
 
     /** Pull remote photos for the current family and merge into the feed. */
@@ -194,11 +258,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun addComment(photoId: String, text: String) {
-        if (text.isBlank()) return
+        val safe = Validate.comment(text)
+        if (safe.isBlank()) return
         val newComment = Comment(
             id = "c_${System.currentTimeMillis()}",
             authorId = FamilyRepository.currentUserId,
-            text = text.trim(),
+            text = safe,
             createdAt = LocalDateTime.now(),
         )
         _state.update { s ->
@@ -210,13 +275,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun addLocalPhotos(paths: List<String>, caption: String, albumId: String?) {
         if (paths.isEmpty()) return
+        val safeCaption = Validate.caption(caption)
         val now = LocalDateTime.now()
         val today = LocalDate.now()
         val newStored = paths.map { path ->
             StoredPhoto(
                 id = "p_${UUID.randomUUID()}",
                 path = path,
-                caption = caption.ifBlank { "A new little memory." },
+                caption = safeCaption.ifBlank { "A new little memory." },
                 authorId = FamilyRepository.currentUserId,
                 createdAtIso = now.toString(),
                 takenOnIso = today.toString(),
@@ -248,7 +314,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun createAlbum(title: String): String {
-        val cleanTitle = title.trim().ifBlank { "Untitled album" }
+        val cleanTitle = Validate.name(title, max = Validate.MAX_FAMILY_NAME).ifBlank { "Untitled album" }
         val color = ACCENT_PALETTE[(cleanTitle.hashCode() and 0x7fffffff) % ACCENT_PALETTE.size]
         val today = LocalDate.now()
         val month = today.month.name.lowercase().replaceFirstChar { it.uppercase() }

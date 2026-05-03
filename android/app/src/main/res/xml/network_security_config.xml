@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Kin network security:
+    - TLS-only traffic for the entire app (no cleartext anywhere).
+    - System trust anchors only (no user-installed CAs accepted), reducing
+      MITM risk on rooted/compromised devices.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
