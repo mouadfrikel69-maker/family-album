@@ -1,8 +1,8 @@
 # Supabase setup for Kin
 
-Kin uses Supabase for **authentication**, **per-family row-level security**,
-and **private file storage** with signed URLs. The previous "anyone with the
-invite code wins" model has been replaced with real auth + RLS.
+Kin uses Supabase for **authentication** and **per‑family membership / invites
+only**. Photos and albums live on the device (EncryptedSharedPreferences +
+the app's private storage), so Supabase never sees your media.
 
 ## 1. Create a Supabase project
 
@@ -29,7 +29,8 @@ provider you don't use. For production:
 
 ## 3. Schema, indices, and RLS
 
-Open **SQL Editor → New query** and run this once:
+Open **SQL Editor → New query** and run this once. It creates only the
+two tables Kin actually needs in the cloud: `families` and `family_members`.
 
 ```sql
 -- =========================================================
@@ -46,7 +47,9 @@ create table if not exists families (
 -- =========================================================
 -- family_members: who belongs to which family + their role
 -- =========================================================
-create type family_role as enum ('admin', 'member', 'viewer');
+do $$ begin
+  create type family_role as enum ('admin', 'member', 'viewer');
+exception when duplicate_object then null; end $$;
 
 create table if not exists family_members (
   family_id uuid not null references families(id) on delete cascade,
@@ -64,29 +67,6 @@ create index if not exists family_members_user_idx
   on family_members (user_id);
 
 -- =========================================================
--- family_photos: every photo belongs to exactly one family
--- =========================================================
-create table if not exists family_photos (
-  id uuid primary key default gen_random_uuid(),
-  family_id uuid not null references families(id) on delete cascade,
-  invite_code text not null,
-  local_id text not null,
-  author_id uuid not null references auth.users(id) on delete cascade,
-  author_name text not null check (char_length(author_name) <= 60),
-  author_initials text not null check (char_length(author_initials) <= 4),
-  author_color bigint not null,
-  caption text not null default '' check (char_length(caption) <= 500),
-  image_url text not null check (char_length(image_url) <= 1000),
-  taken_on date not null default current_date,
-  created_at timestamptz not null default now()
-);
-
-create index if not exists family_photos_family_idx
-  on family_photos (family_id, created_at desc);
-create index if not exists family_photos_invite_idx
-  on family_photos (invite_code, created_at desc);
-
--- =========================================================
 -- helper: is the caller a member of this family?
 -- =========================================================
 create or replace function is_family_member(fid uuid)
@@ -98,11 +78,10 @@ returns boolean language sql stable security definer as $$
 $$;
 
 -- =========================================================
--- enable RLS on everything
+-- enable RLS
 -- =========================================================
-alter table families        enable row level security;
-alter table family_members  enable row level security;
-alter table family_photos   enable row level security;
+alter table families       enable row level security;
+alter table family_members enable row level security;
 
 -- =========================================================
 -- families: members can read their family; only the creator can update/delete it
@@ -126,7 +105,7 @@ create policy "families delete" on families
 
 -- =========================================================
 -- family_members: members can see each other; users insert their own row
--- (joining a family by invite_code happens server-side via an RPC, see below)
+-- (joining a family by invite_code happens server-side via the RPC below)
 -- =========================================================
 drop policy if exists "members read"   on family_members;
 drop policy if exists "members insert" on family_members;
@@ -150,29 +129,6 @@ create policy "members delete" on family_members
       where f.id = family_members.family_id and f.created_by = auth.uid()
     )
   );
-
--- =========================================================
--- family_photos: only members can read; only members can insert as themselves;
--- only the author can update/delete their own photo.
--- =========================================================
-drop policy if exists "photos read"   on family_photos;
-drop policy if exists "photos insert" on family_photos;
-drop policy if exists "photos update" on family_photos;
-drop policy if exists "photos delete" on family_photos;
-
-create policy "photos read" on family_photos
-  for select using (is_family_member(family_id));
-
-create policy "photos insert" on family_photos
-  for insert with check (
-    is_family_member(family_id) and author_id = auth.uid()
-  );
-
-create policy "photos update" on family_photos
-  for update using (author_id = auth.uid()) with check (author_id = auth.uid());
-
-create policy "photos delete" on family_photos
-  for delete using (author_id = auth.uid());
 
 -- =========================================================
 -- secure "join by invite_code" RPC
@@ -204,50 +160,29 @@ revoke all on function join_family(text, text, text) from public;
 grant execute on function join_family(text, text, text) to authenticated;
 ```
 
-## 4. Private storage bucket + RLS
+## 4. Migrating from an older setup (optional)
 
-1. **Storage → Create bucket**:
-   - Name: `kin-photos`
-   - **Public bucket: OFF** (private — reads via signed URLs only).
-2. **Storage → Policies → New policy** (for the `kin-photos` bucket):
+If you previously ran the older SQL that created `family_photos` and the
+`kin-photos` storage bucket, run this once to clean it all up:
 
 ```sql
--- Authenticated members can upload only into their family's folder.
--- Convention: object path = "<invite_code>/<uuid>.jpg".
-create policy "kin storage upload"
-on storage.objects for insert
-to authenticated
-with check (
-  bucket_id = 'kin-photos'
-  and exists (
-    select 1 from families f
-    join family_members m on m.family_id = f.id
-    where m.user_id = auth.uid()
-      and split_part(name, '/', 1) = lower(replace(f.invite_code, ' ', '-'))
-  )
-);
+-- drop photo policies + table
+drop policy if exists "photos read"   on family_photos;
+drop policy if exists "photos insert" on family_photos;
+drop policy if exists "photos update" on family_photos;
+drop policy if exists "photos delete" on family_photos;
+drop table if exists family_photos;
 
-create policy "kin storage read"
-on storage.objects for select
-to authenticated
-using (
-  bucket_id = 'kin-photos'
-  and exists (
-    select 1 from families f
-    join family_members m on m.family_id = f.id
-    where m.user_id = auth.uid()
-      and split_part(name, '/', 1) = lower(replace(f.invite_code, ' ', '-'))
-  )
-);
-
-create policy "kin storage delete own"
-on storage.objects for delete
-to authenticated
-using (
-  bucket_id = 'kin-photos'
-  and owner = auth.uid()
-);
+-- drop storage policies
+drop policy if exists "kin storage upload"     on storage.objects;
+drop policy if exists "kin storage read"       on storage.objects;
+drop policy if exists "kin storage delete own" on storage.objects;
 ```
+
+Then in **Storage**: open the `kin-photos` bucket → **Delete bucket**.
+
+After cleanup, the **Table Editor** should show only `families` and
+`family_members` (plus Supabase's built‑in `auth.users`).
 
 ## 5. What this gives you
 
@@ -256,7 +191,7 @@ using (
 | Transport | TLS-only (network security config); cleartext disabled. |
 | Auth | Email + password via Supabase GoTrue; JWTs in EncryptedSharedPreferences. |
 | Authorisation | Per-table RLS keyed off `family_members.user_id = auth.uid()`. |
-| Storage | Private bucket; reads via 60s signed URLs; writes scoped to caller's family path. |
+| Photos & albums | Stored **only** on device in EncryptedSharedPreferences + app private storage. Supabase never receives them. |
 | Local data | EncryptedSharedPreferences (AES-256-GCM, Android Keystore). |
 | Backups | Auto-backup + device transfer disabled — secrets never leave the device. |
 | Input | Length caps + unicode sanitisation client- and server-side. |
@@ -266,5 +201,6 @@ using (
 
 Rebuild Kin. Sign up with email/password, create a family (you become the
 creator + first member), then invite others by sharing the invite code.
-Other members open the app, sign up, paste the code — and only then can
-they see your family's photos.
+Other members open the app, sign up, paste the code — and they instantly
+appear in the family. Photos they take stay on their own device until you
+later decide to add cloud sync.
