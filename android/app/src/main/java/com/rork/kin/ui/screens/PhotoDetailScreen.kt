@@ -26,11 +26,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
 import android.widget.Toast
+import androidx.core.content.FileProvider
+import java.io.File
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -84,23 +83,25 @@ fun PhotoDetailScreen(
     val context = LocalContext.current
 
     fun onShare() {
-        appVm.getShareUrl(photo.id) { url ->
-            if (url == null) {
-                Toast.makeText(
-                    context,
-                    "Sharing isn't set up yet — add Supabase keys to enable.",
-                    Toast.LENGTH_LONG,
-                ).show()
-                return@getShareUrl
-            }
-            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            cm.setPrimaryClip(ClipData.newPlainText("Kin photo", url))
-            val send = Intent(Intent.ACTION_SEND).apply {
-                type = "text/plain"
-                putExtra(Intent.EXTRA_TEXT, "A memory from Kin: $url")
-            }
-            context.startActivity(Intent.createChooser(send, "Share this memory"))
+        val path = appVm.localPathFor(photo.id)
+            ?: photo.url.removePrefix("file://").takeIf { it.startsWith("/") }
+        val file = path?.let { File(it) }
+        if (file == null || !file.exists()) {
+            Toast.makeText(context, "This photo isn't available to share yet.", Toast.LENGTH_LONG).show()
+            return
         }
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            file,
+        )
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "image/jpeg"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_TEXT, "A memory from Kin")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(send, "Share this memory"))
     }
 
     Box(

@@ -17,14 +17,12 @@ import com.rork.kin.data.Role
 import com.rork.kin.data.SecureStore
 import com.rork.kin.data.StoredPhoto
 import com.rork.kin.data.SupabaseAuth
-import com.rork.kin.data.SupabaseSync
 import com.rork.kin.data.Validate
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.io.File
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.util.UUID
@@ -38,11 +36,9 @@ data class AppState(
     val family: Family? = null,
     val members: List<Member> = emptyList(),
     val inviteCode: String = "",
-    val syncing: Boolean = false,
     val photos: List<Photo> = emptyList(),
     val albums: List<Album> = emptyList(),
     val notifications: List<Notification> = emptyList(),
-    val shareUrls: Map<String, String> = emptyMap(),
 )
 
 private val ACCENT_PALETTE = listOf(
@@ -56,8 +52,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<AppState> = _state.asStateFlow()
 
     private val storedPhotos = MutableStateFlow<List<StoredPhoto>>(emptyList())
-
-    val isCloudConfigured: Boolean get() = SupabaseSync.isConfigured
 
     init {
         viewModelScope.launch {
@@ -203,7 +197,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 members = listOfNotNull(me),
             )
         }
-        syncFromRemote()
     }
 
     fun joinFamily(code: String? = null) {
@@ -231,7 +224,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 members = listOfNotNull(me),
             )
         }
-        syncFromRemote()
     }
 
     fun signOut() {
@@ -240,29 +232,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             SupabaseAuth.signOut(ctx)
             SecureStore.clear(ctx)
             _state.update { AppState() }
-        }
-    }
-
-    /** Pull remote photos for the current family and merge into the feed. */
-    fun syncFromRemote() {
-        if (!SupabaseSync.isConfigured) return
-        val code = _state.value.inviteCode.ifBlank { return }
-        viewModelScope.launch {
-            _state.update { it.copy(syncing = true) }
-            val remote = SupabaseSync.listPhotos(code)
-            val me = FamilyRepository.currentUserId
-            val knownLocalIds = storedPhotos.value.map { it.id }.toSet()
-            val incoming = remote
-                .filter { it.local_id !in knownLocalIds }
-                .map { SupabaseSync.toPhoto(it, me, fallbackId = "r_" + it.local_id) }
-            if (incoming.isNotEmpty()) {
-                _state.update { s ->
-                    val existingIds = s.photos.map { it.id }.toSet()
-                    val deduped = incoming.filter { it.id !in existingIds }
-                    s.copy(photos = deduped + s.photos)
-                }
-            }
-            _state.update { it.copy(syncing = false) }
         }
     }
 
@@ -318,10 +287,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             LocalPhotoStore.saveAll(getApplication(), storedPhotos.value)
         }
-        // Push to Supabase so other family members see them.
-        if (SupabaseSync.isConfigured && _state.value.inviteCode.isNotBlank()) {
-            newStored.forEach { pushStoredToRemote(it) }
-        }
     }
 
     fun addFromUris(uris: List<Uri>, caption: String, albumId: String?, onDone: () -> Unit = {}) {
@@ -351,7 +316,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return album.id
     }
 
-    fun addFromCapture(file: File, caption: String, albumId: String?, onDone: () -> Unit = {}) {
+    fun addFromCapture(file: java.io.File, caption: String, albumId: String?, onDone: () -> Unit = {}) {
         viewModelScope.launch {
             val ctx = getApplication<Application>()
             val path = LocalPhotoStore.importFromCapture(ctx, file)
@@ -360,61 +325,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun pushStoredToRemote(sp: StoredPhoto) {
-        viewModelScope.launch {
-            val file = File(sp.path)
-            if (!file.exists()) return@launch
-            val code = _state.value.inviteCode.ifBlank { return@launch }
-            val publicUrl = SupabaseSync.uploadFile(code, file) ?: return@launch
-            val me = _state.value.currentUser ?: FamilyRepository.currentUser
-            SupabaseSync.insertPhoto(
-                SupabaseSync.RemotePhoto(
-                    invite_code = code,
-                    local_id = sp.id,
-                    author_name = me.name,
-                    author_initials = me.initials,
-                    author_color = me.avatarColor,
-                    caption = sp.caption,
-                    image_url = publicUrl,
-                    taken_on = sp.takenOnIso,
-                )
-            )
-            _state.update { s -> s.copy(shareUrls = s.shareUrls + (sp.id to publicUrl)) }
-        }
-    }
-
-    fun getShareUrl(photoId: String, onResult: (String?) -> Unit) {
-        val photo = photoById(photoId)
-        if (photo != null && (photo.url.startsWith("https://") || photo.url.startsWith("http://"))) {
-            onResult(photo.url); return
-        }
-        _state.value.shareUrls[photoId]?.let { onResult(it); return }
-        if (!SupabaseSync.isConfigured) { onResult(null); return }
-        val sp = storedPhotos.value.firstOrNull { it.id == photoId }
-        if (sp == null) { onResult(null); return }
-        viewModelScope.launch {
-            val file = File(sp.path)
-            if (!file.exists()) { onResult(null); return@launch }
-            val code = _state.value.inviteCode.ifBlank { onResult(null); return@launch }
-            val publicUrl = SupabaseSync.uploadFile(code, file)
-            if (publicUrl == null) { onResult(null); return@launch }
-            val me = _state.value.currentUser ?: FamilyRepository.currentUser
-            SupabaseSync.insertPhoto(
-                SupabaseSync.RemotePhoto(
-                    invite_code = code,
-                    local_id = sp.id,
-                    author_name = me.name,
-                    author_initials = me.initials,
-                    author_color = me.avatarColor,
-                    caption = sp.caption,
-                    image_url = publicUrl,
-                    taken_on = sp.takenOnIso,
-                )
-            )
-            _state.update { s -> s.copy(shareUrls = s.shareUrls + (sp.id to publicUrl)) }
-            onResult(publicUrl)
-        }
-    }
+    /** Resolve the on-device file path for a photo, if it's a locally stored one. */
+    fun localPathFor(photoId: String): String? =
+        storedPhotos.value.firstOrNull { it.id == photoId }?.path
 
     /** Resolve a member by id, falling back to a soft placeholder. */
     fun memberById(id: String): Member =
