@@ -14,7 +14,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -39,18 +38,26 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -77,12 +84,44 @@ import com.rork.kin.ui.theme.SageMist
 import com.rork.kin.ui.theme.Terracotta
 import com.rork.kin.ui.theme.WashiTan
 
+/**
+ * Sign-in / create-account screen.
+ *
+ * The screen owns email + password input and the sign-in / sign-up toggle.
+ * `submit` is the only way out of this screen — it returns null on success
+ * (in which case `onAuthed` is fired) or an error message that is shown
+ * inline. The previous "tap continue, skip auth" backdoor is gone.
+ */
 @Composable
-fun AuthScreen(onContinue: () -> Unit) {
+fun AuthScreen(
+    submit: suspend (email: String, password: String, isSignUp: Boolean) -> String?,
+    onAuthed: () -> Unit,
+    isDevAuthBypass: Boolean = false,
+) {
     var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var showPassword by remember { mutableStateOf(false) }
+    var isSignUp by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var loading by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     val statusInsets = WindowInsets.statusBars.asPaddingValues()
     val navInsets = WindowInsets.navigationBars.asPaddingValues()
     val scroll = rememberScrollState()
+
+    val canSubmit = !loading && email.isNotBlank() && password.isNotBlank()
+    val onSubmit = {
+        if (canSubmit) {
+            error = null
+            loading = true
+            scope.launch {
+                val msg = submit(email.trim(), password, isSignUp)
+                loading = false
+                if (msg == null) onAuthed() else error = msg
+            }
+        }
+        Unit
+    }
 
     PaperBackground {
         Column(
@@ -152,6 +191,11 @@ fun AuthScreen(onContinue: () -> Unit) {
                     textAlign = TextAlign.Center,
                 )
 
+                if (isDevAuthBypass) {
+                    Spacer(Modifier.height(16.dp))
+                    DevBypassBanner()
+                }
+
                 Spacer(Modifier.height(28.dp))
 
                 // ---- EMAIL CARD ----
@@ -172,7 +216,7 @@ fun AuthScreen(onContinue: () -> Unit) {
                     )
                     OutlinedTextField(
                         value = email,
-                        onValueChange = { email = it },
+                        onValueChange = { email = it; error = null },
                         placeholder = {
                             Text(
                                 "you@home.com",
@@ -183,6 +227,7 @@ fun AuthScreen(onContinue: () -> Unit) {
                             Icon(Icons.Filled.AlternateEmail, null, tint = Terracotta)
                         },
                         singleLine = true,
+                        enabled = !loading,
                         shape = RoundedCornerShape(16.dp),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
                         colors = OutlinedTextFieldDefaults.colors(
@@ -194,58 +239,79 @@ fun AuthScreen(onContinue: () -> Unit) {
                         modifier = Modifier.fillMaxWidth(),
                     )
 
+                    Spacer(Modifier.height(10.dp))
+
+                    Text(
+                        "your password",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Mocha.copy(alpha = 0.7f),
+                        modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),
+                    )
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it; error = null },
+                        placeholder = {
+                            Text(
+                                if (isSignUp) "at least 8 characters" else "your password",
+                                color = Mocha.copy(alpha = 0.45f),
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(Icons.Filled.Lock, null, tint = Terracotta)
+                        },
+                        trailingIcon = {
+                            IconButton(onClick = { showPassword = !showPassword }) {
+                                Icon(
+                                    if (showPassword) Icons.Filled.VisibilityOff
+                                    else Icons.Filled.Visibility,
+                                    contentDescription = if (showPassword) "Hide password" else "Show password",
+                                    tint = Mocha.copy(alpha = 0.7f),
+                                )
+                            }
+                        },
+                        visualTransformation = if (showPassword) VisualTransformation.None
+                        else PasswordVisualTransformation(),
+                        singleLine = true,
+                        enabled = !loading,
+                        shape = RoundedCornerShape(16.dp),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Terracotta.copy(alpha = 0.6f),
+                            unfocusedBorderColor = BlushPink,
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    if (error != null) {
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            error!!,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFB35A3D),
+                            textAlign = TextAlign.Start,
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                        )
+                    }
+
                     Spacer(Modifier.height(14.dp))
 
-                    PrimaryContinueButton(onClick = onContinue)
-                }
-
-                Spacer(Modifier.height(22.dp))
-
-                // ---- DIVIDER ----
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(1.dp)
-                            .background(BlushPink),
+                    PrimaryContinueButton(
+                        label = if (isSignUp) "Create account" else "Sign in",
+                        loading = loading,
+                        enabled = canSubmit,
+                        onClick = onSubmit,
                     )
-                    Text(
-                        "  or continue with  ",
-                        color = Mocha.copy(alpha = 0.7f),
-                        style = MaterialTheme.typography.labelSmall,
-                    )
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(1.dp)
-                            .background(BlushPink),
-                    )
-                }
 
-                Spacer(Modifier.height(16.dp))
+                    Spacer(Modifier.height(10.dp))
 
-                // ---- SOCIAL ROW ----
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    SocialChip(
-                        label = "Apple",
-                        bg = Color(0xFF1F1B16),
-                        fg = Color.White,
-                        modifier = Modifier.weight(1f),
-                        onClick = onContinue,
-                    )
-                    SocialChip(
-                        label = "Google",
-                        bg = PolaroidWhite,
-                        fg = InkBrown,
-                        bordered = true,
-                        modifier = Modifier.weight(1f),
-                        onClick = onContinue,
+                    SignUpToggle(
+                        isSignUp = isSignUp,
+                        onToggle = {
+                            isSignUp = !isSignUp
+                            error = null
+                        },
                     )
                 }
 
@@ -301,7 +367,7 @@ private fun HeroPolaroidStack(modifier: Modifier = Modifier) {
         label = "drift",
     )
 
-    BoxWithConstraints(
+    Box(
         modifier = modifier.height(300.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -399,20 +465,30 @@ private fun HeroPolaroid(
 // ---------- BUTTONS ----------
 
 @Composable
-private fun PrimaryContinueButton(onClick: () -> Unit) {
+private fun PrimaryContinueButton(
+    label: String = "Continue",
+    loading: Boolean = false,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
     val interaction = remember { MutableInteractionSource() }
     var pressed by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.97f else 1f,
+        targetValue = if (pressed && enabled) 0.97f else 1f,
         animationSpec = spring(dampingRatio = 0.55f, stiffness = 380f),
         label = "btnScale",
     )
+    LaunchedEffect(loading) { if (!loading) pressed = false }
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .height(56.dp)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                alpha = if (enabled) 1f else 0.55f
+            }
             .shadow(10.dp, RoundedCornerShape(18.dp))
             .clip(RoundedCornerShape(18.dp))
             .background(
@@ -421,80 +497,96 @@ private fun PrimaryContinueButton(onClick: () -> Unit) {
                 ),
             )
             .clickable(
+                enabled = enabled,
                 interactionSource = interaction,
                 indication = null,
             ) {
                 pressed = true
                 onClick()
-                pressed = false
             },
         contentAlignment = Alignment.Center,
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center,
-        ) {
-            Text(
-                "Continue",
-                style = MaterialTheme.typography.titleMedium.copy(fontSize = 16.sp),
+        if (loading) {
+            CircularProgressIndicator(
                 color = Color.White,
+                strokeWidth = 2.5.dp,
+                modifier = Modifier.size(22.dp),
             )
-            Spacer(Modifier.width(8.dp))
-            Icon(
-                Icons.Filled.ArrowForward,
-                null,
-                tint = Color.White,
-                modifier = Modifier.size(18.dp),
-            )
+        } else {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.titleMedium.copy(fontSize = 16.sp),
+                    color = Color.White,
+                )
+                Spacer(Modifier.width(8.dp))
+                Icon(
+                    Icons.Filled.ArrowForward,
+                    null,
+                    tint = Color.White,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun SocialChip(
-    label: String,
-    bg: Color,
-    fg: Color,
-    onClick: () -> Unit,
-    bordered: Boolean = false,
-    modifier: Modifier = Modifier,
-) {
-    val interaction = remember { MutableInteractionSource() }
-    var pressed by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.96f else 1f,
-        animationSpec = spring(dampingRatio = 0.6f, stiffness = 420f),
-        label = "chipScale",
-    )
-
-    Box(
-        modifier = modifier
-            .height(52.dp)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .shadow(if (bordered) 0.dp else 4.dp, RoundedCornerShape(16.dp))
-            .clip(RoundedCornerShape(16.dp))
-            .background(bg)
-            .then(
-                if (bordered) Modifier.border(
-                    1.dp,
-                    BlushPink,
-                    RoundedCornerShape(16.dp),
-                ) else Modifier,
-            )
-            .clickable(
-                interactionSource = interaction,
-                indication = null,
-            ) {
-                pressed = true
-                onClick()
-                pressed = false
-            },
-        contentAlignment = Alignment.Center,
+private fun SignUpToggle(isSignUp: Boolean, onToggle: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable { onToggle() }
+            .padding(vertical = 6.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            label,
-            color = fg,
-            style = MaterialTheme.typography.titleMedium,
+            text = if (isSignUp) "Already have an account?" else "New here?",
+            style = MaterialTheme.typography.bodySmall,
+            color = Mocha.copy(alpha = 0.8f),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = if (isSignUp) "Sign in" else "Create one",
+            style = MaterialTheme.typography.bodySmall.copy(
+                fontStyle = FontStyle.Italic,
+            ),
+            color = Terracotta,
+        )
+    }
+}
+
+@Composable
+private fun DevBypassBanner() {
+    Row(
+        modifier = Modifier
+            .padding(horizontal = 12.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(WashiTan.copy(alpha = 0.35f))
+            .border(
+                1.dp,
+                WashiTan.copy(alpha = 0.7f),
+                RoundedCornerShape(12.dp),
+            )
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(Color(0xFFB35A3D)),
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            "DEV — auth bypassed (Supabase not configured)",
+            style = MaterialTheme.typography.labelSmall,
+            color = InkBrown,
         )
     }
 }

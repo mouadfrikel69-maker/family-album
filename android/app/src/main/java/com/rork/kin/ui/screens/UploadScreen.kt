@@ -10,7 +10,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -96,7 +95,6 @@ fun UploadScreen(
     var caption by remember { mutableStateOf("") }
     var selectedAlbum by remember { mutableStateOf<String?>(null) }
     var uploading by remember { mutableStateOf(false) }
-    var progress by remember { mutableStateOf(0f) }
 
     var showCameraRationale by remember { mutableStateOf(false) }
     var showCameraDenied by remember { mutableStateOf(false) }
@@ -347,9 +345,10 @@ fun UploadScreen(
 
         AnimatedVisibility(visible = uploading, enter = fadeIn(tween(220)), exit = fadeOut(tween(180))) {
             Column(modifier = Modifier.padding(horizontal = 20.dp)) {
-                val animated by animateFloatAsState(progress, label = "upload")
+                // Indeterminate — the file copy doesn't expose byte-level progress,
+                // so animating a fake fraction is misleading. The pulsing bar tells
+                // the user "we're working" without lying about how far along we are.
                 LinearProgressIndicator(
-                    progress = { animated },
                     color = Terracotta,
                     trackColor = BlushPink.copy(alpha = 0.4f),
                     modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
@@ -368,13 +367,11 @@ fun UploadScreen(
             onClick = {
                 if (selectedUris.isEmpty() || uploading) return@Button
                 uploading = true
-                progress = 0.15f
                 appVm.addFromUris(
                     uris = selectedUris,
                     caption = caption,
                     albumId = selectedAlbum,
                 ) {
-                    progress = 1f
                     uploading = false
                     selectedUris = emptyList()
                     capturedFile = null

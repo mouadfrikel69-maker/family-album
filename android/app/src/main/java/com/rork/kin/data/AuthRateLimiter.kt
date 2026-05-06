@@ -1,7 +1,7 @@
 package com.rork.kin.data
 
 import android.content.Context
-import kotlin.math.min
+import java.security.MessageDigest
 
 /**
  * Brute-force defence for the sign-in screen.
@@ -24,10 +24,18 @@ object AuthRateLimiter {
     private const val PREFIX_UNTIL = "auth_until_"
 
     private fun keyHash(email: String): String {
-        // Don't store the raw email as a key (mild PII). Stable hash is enough.
-        var h = 0
-        email.lowercase().trim().forEach { h = 31 * h + it.code }
-        return Integer.toHexString(h)
+        // Don't store the raw email as a key (mild PII). The previous polynomial
+        // hash had a 32-bit codomain, so two unrelated emails could trivially
+        // collide and share a lockout counter. SHA-256 truncated to 16 hex chars
+        // (64 bits) makes that ~impossible while staying short enough for a key.
+        val bytes = MessageDigest.getInstance("SHA-256")
+            .digest(email.lowercase().trim().toByteArray(Charsets.UTF_8))
+        val sb = StringBuilder(16)
+        for (i in 0 until 8) {
+            sb.append(((bytes[i].toInt() ushr 4) and 0xF).toString(16))
+            sb.append((bytes[i].toInt() and 0xF).toString(16))
+        }
+        return sb.toString()
     }
 
     /** Milliseconds remaining before [email] may try again, or 0 if not locked. */
@@ -62,7 +70,11 @@ object AuthRateLimiter {
         fails < 5 -> 30_000L            // 30s
         fails < 8 -> 2 * 60_000L        // 2m
         fails < 12 -> 10 * 60_000L      // 10m
-        else -> min(60L, fails.toLong()) * 60_000L  // 1h cap
+        // The previous formula was `min(60L, fails) * 60_000L`, which only hit
+        // the documented "1h cap" once `fails >= 60` — i.e. it took 48 extra
+        // failures past the threshold to actually reach 1 hour. Now 12+ fails
+        // immediately maps to a 1h lockout per the spec.
+        else -> 60L * 60_000L           // 1h
     }
 
     fun formatRemaining(ms: Long): String {

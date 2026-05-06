@@ -17,10 +17,34 @@ android {
         versionName = "1.0"
     }
 
+    // A real release signing config is wired up only when KIN_RELEASE_KEYSTORE is set
+    // (e.g. on CI / a signing machine). Without it, the release variant intentionally
+    // has no signingConfig so an unsigned release build fails fast — much safer than
+    // silently shipping an APK signed with the debug key.
+    val releaseKeystore: String? = System.getenv("KIN_RELEASE_KEYSTORE")
+        ?: project.findProperty("KIN_RELEASE_KEYSTORE") as String?
+    if (releaseKeystore != null) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = (System.getenv("KIN_RELEASE_KEYSTORE_PASSWORD")
+                    ?: project.findProperty("KIN_RELEASE_KEYSTORE_PASSWORD") as String?)
+                keyAlias = (System.getenv("KIN_RELEASE_KEY_ALIAS")
+                    ?: project.findProperty("KIN_RELEASE_KEY_ALIAS") as String?)
+                keyPassword = (System.getenv("KIN_RELEASE_KEY_PASSWORD")
+                    ?: project.findProperty("KIN_RELEASE_KEY_PASSWORD") as String?)
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            // Only assign the release signingConfig if we actually defined one.
+            // Otherwise leave it null so an attempt to ship a release build without
+            // a signing key fails loudly rather than producing a debug-signed APK.
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -31,6 +55,10 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+        // minSdk is 24 but the codebase uses java.time everywhere, which is
+        // API 26+. Enable core-library desugaring so LocalDate / LocalDateTime
+        // / Duration etc. work on API 24/25 instead of crashing at runtime.
+        isCoreLibraryDesugaringEnabled = true
     }
 
     buildFeatures {
@@ -65,8 +93,9 @@ dependencies {
     implementation(libs.ktor.serialization.json)
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
-    implementation(libs.koin.androidx.compose)
     implementation(libs.zxing.core)
     implementation(libs.androidx.security.crypto)
+    implementation(libs.androidx.exifinterface)
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
     debugImplementation(libs.androidx.ui.tooling)
 }

@@ -443,8 +443,8 @@ grant execute on function join_family(text, text, text) to authenticated;
 | Transport | TLS-only via `network_security_config.xml`. `usesCleartextTraffic="false"`. System trust anchors only — rejects user-installed CAs (MITM resistance on rooted devices). |
 | Auth | Email + password via Supabase GoTrue. Tokens stored in `EncryptedSharedPreferences` only. Session restored on launch. |
 | Authorisation | Per-table RLS keyed on `family_members.user_id = auth.uid()` via `is_family_member()`. Joining is mediated by the `join_family` RPC so users can't see other families. |
-| Photos & albums | Stored **only** on device — `EncryptedSharedPreferences` for metadata about secrets, app-private `filesDir/photos/` for image bytes. Supabase never receives them. |
-| Local data at rest | AES-256-GCM via Android Keystore (`MasterKey AES256_GCM`). |
+| Photos & albums | Stored **only** on device, in app-private `filesDir/photos/` for image bytes and a JSON metadata file alongside. Other apps cannot read them, but the bytes are **not** themselves encrypted by Kin today — the device screen-lock is the only barrier. Supabase never receives them. |
+| Secrets at rest | A small set of identifiers (auth tokens, family id, invite code, profile name, hashed-email rate-limit keys) lives in `EncryptedSharedPreferences` with AES-256-GCM values + AES-256-SIV keys, both wrapped by an Android Keystore `MasterKey AES256_GCM`. |
 | Backups | `allowBackup="false"`, `fullBackupContent` excludes everything, `dataExtractionRules` excludes both `cloud-backup` and `device-transfer`. Secrets never leave the device. |
 | Screenshots | `FLAG_SECURE` set in `MainActivity` — blocks screenshots and recents-thumbnail leaks. |
 | Input hygiene | `Validate` strips control chars, zero-width, bidi-override and BOM; enforces length caps everywhere (NAME 60, RELATIONSHIP 30, CAPTION 500, FAMILY 60, COMMENT 1000, EMAIL 254). |

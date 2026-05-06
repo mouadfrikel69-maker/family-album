@@ -98,6 +98,35 @@ object SupabaseAuth {
     suspend fun signIn(ctx: Context, email: String, password: String): AuthResult =
         post(ctx, "/auth/v1/token?grant_type=password", email, password)
 
+    /**
+     * Map a GoTrue HTTP error response to a short, human-readable inline message.
+     * The previous one-liner ("Sign-in failed (400)") was equally unhelpful for
+     * "wrong password" and "rate-limited", so users couldn't tell what to fix.
+     *
+     * GoTrue replies with `{"error":"…","error_description":"…"}` or
+     * `{"msg":"…"}`; we cherry-pick the most actionable string and fall back
+     * to a generic message for unrecognised codes.
+     */
+    private fun explainAuthError(statusCode: Int, body: String, isSignUp: Boolean): String {
+        val lower = body.lowercase()
+        return when {
+            "invalid login credentials" in lower ||
+                "invalid_grant" in lower -> "Wrong email or password"
+            "email not confirmed" in lower -> "Confirm your email first, then try again"
+            "user already registered" in lower ||
+                "email address is already" in lower -> "That email already has an account \u2014 sign in instead"
+            "weak password" in lower ||
+                "password should be at least" in lower -> "Pick a stronger password (8+ chars, with a number)"
+            "rate limit" in lower ||
+                statusCode == 429 -> "Too many attempts. Wait a minute and try again."
+            statusCode == 400 -> if (isSignUp) "Could not create account" else "Wrong email or password"
+            statusCode == 401 -> "Wrong email or password"
+            statusCode == 422 -> "That email address looks invalid"
+            statusCode in 500..599 -> "Auth server is having trouble \u2014 try again in a moment"
+            else -> if (isSignUp) "Sign-up failed (${statusCode})" else "Sign-in failed (${statusCode})"
+        }
+    }
+
     private suspend fun post(
         ctx: Context,
         path: String,
@@ -105,6 +134,7 @@ object SupabaseAuth {
         password: String,
     ): AuthResult = withContext(Dispatchers.IO) {
         if (!isConfigured) return@withContext AuthResult.Error("Auth not configured")
+        val isSignUp = "signup" in path
         runCatching {
             val res = client.post("$baseUrl$path") {
                 headers {
@@ -114,14 +144,17 @@ object SupabaseAuth {
                 setBody(CredsBody(email, password))
             }
             if (!res.status.isSuccess()) {
-                return@runCatching AuthResult.Error("Sign-in failed (${res.status.value})")
+                val body = runCatching { res.bodyAsText() }.getOrDefault("")
+                return@runCatching AuthResult.Error(
+                    explainAuthError(res.status.value, body, isSignUp),
+                )
             }
             val s = json.decodeFromString<Session>(res.bodyAsText())
             persist(ctx, s)
             session = s
             AuthResult.Ok(s)
         }.onFailure { Log.w(TAG, "auth post error", it) }
-            .getOrElse { AuthResult.Error("Network error") }
+            .getOrElse { AuthResult.Error("Network error \u2014 check your connection") }
     }
 
     /** Exchange the refresh token for a fresh access token. Returns null on failure. */

@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Encrypted on-device storage for Kin secrets.
@@ -41,7 +42,10 @@ object SecureStore {
     const val KEY_PROFILE_COLOR = "profile_color"
 
     @Volatile private var prefs: SharedPreferences? = null
-    private val memoryFallback = mutableMapOf<String, String>()
+    // Coroutines from Dispatchers.IO read/write SecureStore concurrently. The
+    // previous mutableMapOf was not thread-safe, so the fallback could throw
+    // ConcurrentModificationException or lose writes under load.
+    private val memoryFallback = ConcurrentHashMap<String, String>()
 
     private fun ensure(ctx: Context): SharedPreferences? {
         prefs?.let { return it }
@@ -69,7 +73,8 @@ object SecureStore {
                 if (value == null) remove(key) else putString(key, value)
             }.apply()
         } else {
-            if (value == null) memoryFallback.remove(key) else memoryFallback[key] = value
+            if (value == null) memoryFallback.remove(key)
+            else memoryFallback[key] = value
         }
     }
 
