@@ -193,8 +193,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             .joinToString("") { it.first().uppercase() }
             .ifBlank { "Y" }
         val color = ACCENT_PALETTE[(cleanName.hashCode() and 0x7fffffff) % ACCENT_PALETTE.size]
+        // The local Member.id MUST match the Supabase auth UID so it lines up
+        // with the `family_members.user_id` column on the server. Without this
+        // the merge logic in [refreshMembers] couldn't tell that the current
+        // user's local row and the one fetched from PostgREST were the same
+        // person, which produced a duplicate "you" pill in MembersScreen.
+        // Local-only mode (no Supabase) keeps the synthetic id as a fallback.
+        val authUid = SupabaseAuth.session?.user?.id
+        val memberId = authUid ?: "me_${UUID.randomUUID()}"
         val me = Member(
-            id = "me_${UUID.randomUUID()}",
+            id = memberId,
             name = cleanName,
             relationship = cleanRel,
             avatarColor = color,
