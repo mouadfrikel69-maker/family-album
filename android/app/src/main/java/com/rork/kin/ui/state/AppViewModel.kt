@@ -220,7 +220,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 profileReady = true,
                 currentUser = me,
-                members = if (it.members.any { m -> m.id == me.id }) it.members else listOf(me) + it.members.filter { m -> m.id != FamilyRepository.currentUserId },
+                // Always replace the current user's row with the freshly-built
+                // local one. Pre-PR-N1 the local id was a fresh UUID per call,
+                // so the "skip if any matches" guard was harmless. Now that
+                // me.id is the stable Supabase auth UID, refreshMembers in
+                // init has already pushed a remote row with that same id into
+                // the list, and the old guard would keep that stale remote
+                // copy and silently discard the user's just-entered name /
+                // initials / colour. listOf(me) + filter handles three cases
+                // at once: replaces an existing remote row, drops a stale
+                // pre-mode-switch synthetic id, and prepends a fresh entry.
+                members = listOf(me) + it.members.filter { m ->
+                    m.id != me.id && m.id != FamilyRepository.currentUserId
+                },
             )
         }
         // Avatar URI is accepted for future use; not persisted yet.
