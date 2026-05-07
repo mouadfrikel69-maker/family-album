@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.rork.kin.data.Album
 import com.rork.kin.data.AuthRateLimiter
+import com.rork.kin.data.AvatarColor
 import com.rork.kin.data.Comment
 import com.rork.kin.data.Family
 import com.rork.kin.data.FamilyRepository
@@ -42,10 +43,10 @@ data class AppState(
     val notifications: List<Notification> = emptyList(),
 )
 
-private val ACCENT_PALETTE = listOf(
-    0xFFC76B4A, 0xFFE8B4A0, 0xFFD4A574, 0xFF8B7560,
-    0xFFB8C4A8, 0xFFA04E33, 0xFFE2A878, 0xFF7C8C6E,
-)
+// Source of truth for avatar accent colours lives in [AvatarColor] so the
+// remote-member mapper in SupabaseFamily can fall back to the same palette
+// when `family_members.avatar_color` is its default (0L = transparent).
+private val ACCENT_PALETTE: List<Long> get() = AvatarColor.PALETTE
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -61,6 +62,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val restored = SupabaseAuth.restore(ctx)
             val savedCode = SecureStore.get(ctx, SecureStore.KEY_INVITE_CODE).orEmpty()
             val savedFamilyName = SecureStore.get(ctx, SecureStore.KEY_FAMILY_NAME).orEmpty()
+            val savedFamilyId = SecureStore.get(ctx, SecureStore.KEY_FAMILY_ID)
             if (restored != null) {
                 _state.update {
                     it.copy(
@@ -68,7 +70,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         inviteCode = savedCode,
                         inFamily = savedCode.isNotBlank(),
                         family = if (savedCode.isNotBlank()) Family(
-                            id = SecureStore.get(ctx, SecureStore.KEY_FAMILY_ID) ?: "fam_local",
+                            id = savedFamilyId ?: "fam_local",
                             name = savedFamilyName.ifBlank { "Your family" },
                             inviteCode = savedCode,
                             createdAt = LocalDate.now(),
@@ -80,6 +82,46 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             storedPhotos.value = saved
             if (saved.isNotEmpty()) {
                 _state.update { it.copy(photos = saved.map(LocalPhotoStore::toPhoto)) }
+            }
+            // Pull the canonical member list from Supabase so other devices
+            // appear in the UI — the previous build only ever showed the local
+            // "You" because nothing read `family_members` back. Best-effort: a
+            // network failure leaves the local fallback intact.
+            if (restored != null && SupabaseAuth.isConfigured && savedFamilyId != null) {
+                refreshMembers(savedFamilyId)
+            }
+        }
+    }
+
+    /**
+     * Pull the family's current `family_members` rows from Supabase and merge
+     * them into [_state]. The local "You" pill is kept at the head of the
+     * list so it never disappears during a network blip; remote rows replace
+     * the local placeholder for the same `user_id`.
+     */
+    private suspend fun refreshMembers(familyId: String) {
+        val ctx = getApplication<Application>()
+        when (val r = SupabaseFamily.fetchMembers(ctx, familyId)) {
+            is SupabaseFamily.Result.Ok -> {
+                val remote = r.value
+                _state.update { s ->
+                    val me = s.currentUser
+                    val merged: List<Member> = if (me != null) {
+                        // Prefer the remote row for the current user (it's
+                        // the authoritative one) but if the server hasn't
+                        // populated it yet, keep the local profile.
+                        val remoteMe = remote.firstOrNull { it.id == me.id }
+                        listOfNotNull(remoteMe ?: me) +
+                            remote.filter { it.id != me.id }
+                    } else {
+                        remote
+                    }
+                    s.copy(members = merged)
+                }
+            }
+            is SupabaseFamily.Result.Error -> {
+                // Non-fatal: keep whatever members list we already had so the
+                // UI doesn't suddenly empty out on a transient failure.
             }
         }
     }
@@ -152,8 +194,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             .joinToString("") { it.first().uppercase() }
             .ifBlank { "Y" }
         val color = ACCENT_PALETTE[(cleanName.hashCode() and 0x7fffffff) % ACCENT_PALETTE.size]
+        // The local Member.id MUST match the Supabase auth UID so it lines up
+        // with the `family_members.user_id` column on the server. Without this
+        // the merge logic in [refreshMembers] couldn't tell that the current
+        // user's local row and the one fetched from PostgREST were the same
+        // person, which produced a duplicate "you" pill in MembersScreen.
+        // Local-only mode (no Supabase) keeps the synthetic id as a fallback.
+        val authUid = SupabaseAuth.session?.user?.id
+        val memberId = authUid ?: "me_${UUID.randomUUID()}"
         val me = Member(
-            id = "me_${UUID.randomUUID()}",
+            id = memberId,
             name = cleanName,
             relationship = cleanRel,
             avatarColor = color,
@@ -170,7 +220,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 profileReady = true,
                 currentUser = me,
-                members = if (it.members.any { m -> m.id == me.id }) it.members else listOf(me) + it.members.filter { m -> m.id != FamilyRepository.currentUserId },
+                // Always replace the current user's row with the freshly-built
+                // local one. Pre-PR-N1 the local id was a fresh UUID per call,
+                // so the "skip if any matches" guard was harmless. Now that
+                // me.id is the stable Supabase auth UID, refreshMembers in
+                // init has already pushed a remote row with that same id into
+                // the list, and the old guard would keep that stale remote
+                // copy and silently discard the user's just-entered name /
+                // initials / colour. listOf(me) + filter handles three cases
+                // at once: replaces an existing remote row, drops a stale
+                // pre-mode-switch synthetic id, and prepends a fresh entry.
+                members = listOf(me) + it.members.filter { m ->
+                    m.id != me.id && m.id != FamilyRepository.currentUserId
+                },
             )
         }
         // Avatar URI is accepted for future use; not persisted yet.
@@ -223,6 +285,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 members = listOfNotNull(me),
             )
         }
+        // The DB trigger inserts the creator into `family_members` server-side;
+        // pull that row back so the UI matches what other devices will see.
+        if (SupabaseAuth.isConfigured) refreshMembers(fam.id)
         return null
     }
 
@@ -274,6 +339,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 members = listOfNotNull(me),
             )
         }
+        // After joining, fetch the rest of the family so the new user sees
+        // who's already in it (rather than the previous local-only "just me").
+        if (SupabaseAuth.isConfigured) refreshMembers(fam.id)
         return null
     }
 
@@ -436,8 +504,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun photosByAlbum(albumId: String): List<Photo> {
         val album = albumById(albumId) ?: return emptyList()
-        val direct = _state.value.photos.filter { it.albumIds.contains(albumId) }
-        val seeded = album.photoIds.mapNotNull { pid -> _state.value.photos.firstOrNull { it.id == pid } }
+        val all = _state.value.photos
+        // Build an id-keyed index once so the `seeded` lookup is O(m) instead
+        // of O(n*m). At 5 K photos / 50-photo albums the previous nested
+        // firstOrNull was 250 K comparisons per album-detail render.
+        val byId = all.associateBy { it.id }
+        val direct = all.filter { it.albumIds.contains(albumId) }
+        val seeded = album.photoIds.mapNotNull(byId::get)
         return (direct + seeded).distinctBy { it.id }
     }
 
