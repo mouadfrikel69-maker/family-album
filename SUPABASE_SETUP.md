@@ -1,8 +1,8 @@
 # Supabase setup for Kin
 
-Kin uses Supabase for **authentication** and **per‑family membership / invites
-only**. Photos and albums live on the device (EncryptedSharedPreferences +
-the app's private storage), so Supabase never sees your media.
+Kin uses Supabase for **authentication** and **per‑family membership /
+invites only**. Photos and albums live on the device in app-private file
+storage, so Supabase never sees your media.
 
 ## 1. Create a Supabase project
 
@@ -115,8 +115,21 @@ drop policy if exists "members delete" on family_members;
 create policy "members read" on family_members
   for select using (is_family_member(family_id));
 
+-- Direct INSERT is intentionally restrictive: a user may insert ONLY their
+-- own row into a family they themselves created (the bootstrap step right
+-- after `families.create`). Every other "join by invite code" path is
+-- forced through the `join_family` security-definer RPC defined below.
+-- This closes the hole where any authenticated user with a family UUID
+-- could insert themselves directly, bypassing the invite-code check.
 create policy "members insert" on family_members
-  for insert with check (user_id = auth.uid());
+  for insert with check (
+    user_id = auth.uid()
+    and exists (
+      select 1 from families f
+      where f.id = family_members.family_id
+        and f.created_by = auth.uid()
+    )
+  );
 
 create policy "members update" on family_members
   for update using (user_id = auth.uid()) with check (user_id = auth.uid());
@@ -129,6 +142,36 @@ create policy "members delete" on family_members
       where f.id = family_members.family_id and f.created_by = auth.uid()
     )
   );
+
+-- =========================================================
+-- bootstrap: when a family is created, immediately add the creator as
+-- the first admin member. Without this, the creator would briefly fail
+-- the is_family_member() check on their own family.
+-- =========================================================
+create or replace function on_family_insert_add_creator()
+returns trigger language plpgsql security definer as $$
+begin
+  insert into family_members(family_id, user_id, role, display_name, relationship)
+  values (
+    new.id,
+    new.created_by,
+    'admin',
+    -- display_name has a 1..60-character CHECK constraint. If the user has no
+    -- email yet (rare, but possible on some auth providers) fall back to
+    -- 'Member', and clamp the length so a long email doesn't roll back the
+    -- families INSERT either.
+    left(coalesce(nullif((select email from auth.users where id = new.created_by), ''), 'Member'), 60),
+    ''
+  )
+  on conflict (family_id, user_id) do nothing;
+  return new;
+end;
+$$;
+
+drop trigger if exists families_add_creator on families;
+create trigger families_add_creator
+  after insert on families
+  for each row execute function on_family_insert_add_creator();
 
 -- =========================================================
 -- secure "join by invite_code" RPC
@@ -190,9 +233,9 @@ After cleanup, the **Table Editor** should show only `families` and
 |---|---|
 | Transport | TLS-only (network security config); cleartext disabled. |
 | Auth | Email + password via Supabase GoTrue; JWTs in EncryptedSharedPreferences. |
-| Authorisation | Per-table RLS keyed off `family_members.user_id = auth.uid()`. |
-| Photos & albums | Stored **only** on device in EncryptedSharedPreferences + app private storage. Supabase never receives them. |
-| Local data | EncryptedSharedPreferences (AES-256-GCM, Android Keystore). |
+| Authorisation | Per-table RLS keyed off `family_members.user_id = auth.uid()`. Joining a family is forced through the `join_family` security-definer RPC. |
+| Secrets at rest | A small set of identifiers (email, profile name, family id, invite code, JWT access + refresh tokens) sit in EncryptedSharedPreferences (AES-256-GCM, Android Keystore). |
+| Photos & metadata at rest | Plain JPEG bytes + a JSON metadata file in app-private storage. Other apps cannot read them, but they are **not** encrypted with the app's keystore key today. Treat the device's screen-lock as your protection. |
 | Backups | Auto-backup + device transfer disabled — secrets never leave the device. |
 | Input | Length caps + unicode sanitisation client- and server-side. |
 | Invites | Cryptographic 16-char codes; share code privately. |

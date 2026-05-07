@@ -17,6 +17,7 @@ import com.rork.kin.data.Role
 import com.rork.kin.data.SecureStore
 import com.rork.kin.data.StoredPhoto
 import com.rork.kin.data.SupabaseAuth
+import com.rork.kin.data.SupabaseFamily
 import com.rork.kin.data.Validate
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -85,10 +86,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun completeOnboarding() = _state.update { it.copy(onboarded = true) }
 
-    /** Local-only sign-in flag (kept for screens not yet wired to real auth). */
-    fun signIn() = _state.update { it.copy(authed = true) }
-
-    /** Real Supabase auth — email + password. Returns null on success, error message otherwise. */
+    /**
+     * Real sign-in — email + password. Returns null on success, an inline error
+     * message otherwise. The previous no-arg `signIn()` backdoor is gone.
+     *
+     * In local-only mode (Supabase not configured) the credentials are still
+     * normalised + rate-limited; the only thing skipped is the network round-trip.
+     */
     suspend fun signInWithPassword(email: String, password: String): String? {
         val ctx = getApplication<Application>()
         val cleanEmail = Validate.email(email) ?: return "Enter a valid email"
@@ -100,7 +104,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             return "Too many attempts. Try again in ${AuthRateLimiter.formatRemaining(lockoutMs)}."
         }
         if (!SupabaseAuth.isConfigured) {
-            // Local-only mode — keep app usable without a Supabase project.
+            // Local-only mode — the AuthScreen surfaces a visible "DEV bypass" banner
+            // so this can't be mistaken for a real authenticated session.
             _state.update { it.copy(authed = true) }
             return null
         }
@@ -174,45 +179,39 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun updateProfile(name: String, relationship: String) = setProfile(name, relationship)
 
-    fun createFamily(name: String) {
+    /**
+     * Create a new family. Returns null on success, error message on failure.
+     *
+     * When Supabase is configured the row is inserted into the `families` table
+     * (RLS enforces `auth.uid() = created_by`). In local-only mode the family is
+     * synthesised on-device so the rest of the UI keeps working without a backend.
+     */
+    suspend fun createFamily(name: String): String? {
         val cleanName = Validate.name(name, max = Validate.MAX_FAMILY_NAME).ifBlank { "Our family" }
         val code = Validate.newInviteCode()
-        val fam = Family(
-            id = "fam_${UUID.randomUUID()}",
-            name = cleanName,
-            inviteCode = code,
-            createdAt = LocalDate.now(),
-        )
-        FamilyRepository.family = fam
         val ctx = getApplication<Application>()
-        SecureStore.put(ctx, SecureStore.KEY_INVITE_CODE, code)
-        SecureStore.put(ctx, SecureStore.KEY_FAMILY_ID, fam.id)
-        SecureStore.put(ctx, SecureStore.KEY_FAMILY_NAME, cleanName)
-        val me = _state.value.currentUser
-        _state.update {
-            it.copy(
-                inFamily = true,
-                family = fam,
+
+        val fam: Family = if (SupabaseAuth.isConfigured) {
+            when (val r = SupabaseFamily.createFamily(ctx, cleanName, code)) {
+                is SupabaseFamily.Result.Ok -> Family(
+                    id = r.value.id,
+                    name = r.value.name,
+                    inviteCode = r.value.inviteCode,
+                    createdAt = LocalDate.now(),
+                )
+                is SupabaseFamily.Result.Error -> return r.message
+            }
+        } else {
+            Family(
+                id = "fam_${UUID.randomUUID()}",
+                name = cleanName,
                 inviteCode = code,
-                members = listOfNotNull(me),
+                createdAt = LocalDate.now(),
             )
         }
-    }
 
-    fun joinFamily(code: String? = null) {
-        // Accept lightly-formatted codes; Validate enforces the strict shape.
-        val cleaned = code?.let { Validate.inviteCode(it) }
-            ?: code?.trim()?.uppercase()?.replace(" ", "")
-            ?: ""
-        val fam = Family(
-            id = "fam_join_${UUID.randomUUID()}",
-            name = "Your family",
-            inviteCode = cleaned,
-            createdAt = LocalDate.now(),
-        )
         FamilyRepository.family = fam
-        val ctx = getApplication<Application>()
-        SecureStore.put(ctx, SecureStore.KEY_INVITE_CODE, cleaned)
+        SecureStore.put(ctx, SecureStore.KEY_INVITE_CODE, fam.inviteCode)
         SecureStore.put(ctx, SecureStore.KEY_FAMILY_ID, fam.id)
         SecureStore.put(ctx, SecureStore.KEY_FAMILY_NAME, fam.name)
         val me = _state.value.currentUser
@@ -220,10 +219,62 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 inFamily = true,
                 family = fam,
-                inviteCode = cleaned,
+                inviteCode = fam.inviteCode,
                 members = listOfNotNull(me),
             )
         }
+        return null
+    }
+
+    /**
+     * Join a family by invite code. Returns null on success, error message on
+     * failure. In local-only mode the code is just stored on-device.
+     */
+    suspend fun joinFamily(code: String?): String? {
+        // Accept lightly-formatted codes; Validate enforces the strict shape.
+        val cleaned = code?.let { Validate.inviteCode(it) }
+            ?: return "Enter a valid invite code"
+        val ctx = getApplication<Application>()
+
+        val fam: Family = if (SupabaseAuth.isConfigured) {
+            val me = _state.value.currentUser
+            val displayName = me?.name ?: ""
+            val rel = me?.relationship ?: ""
+            when (val r = SupabaseFamily.joinFamily(ctx, cleaned, displayName, rel)) {
+                is SupabaseFamily.Result.Ok -> Family(
+                    id = r.value,
+                    // The RPC only returns the family id; the name surfaces from the
+                    // "members read" SELECT once it's fetched. Use a soft placeholder
+                    // until then.
+                    name = "Your family",
+                    inviteCode = cleaned,
+                    createdAt = LocalDate.now(),
+                )
+                is SupabaseFamily.Result.Error -> return r.message
+            }
+        } else {
+            Family(
+                id = "fam_join_${UUID.randomUUID()}",
+                name = "Your family",
+                inviteCode = cleaned,
+                createdAt = LocalDate.now(),
+            )
+        }
+
+        FamilyRepository.family = fam
+        SecureStore.put(ctx, SecureStore.KEY_INVITE_CODE, fam.inviteCode)
+        SecureStore.put(ctx, SecureStore.KEY_FAMILY_ID, fam.id)
+        SecureStore.put(ctx, SecureStore.KEY_FAMILY_NAME, fam.name)
+        val me = _state.value.currentUser
+        _state.update {
+            it.copy(
+                inFamily = true,
+                family = fam,
+                inviteCode = fam.inviteCode,
+                members = listOfNotNull(me),
+            )
+        }
+        return null
     }
 
     fun signOut() {
@@ -231,7 +282,31 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val ctx = getApplication<Application>()
             SupabaseAuth.signOut(ctx)
             SecureStore.clear(ctx)
+            // Clear the global mutable singleton too — otherwise the previous
+            // user's name / family flickers in the UI before profile-setup
+            // overwrites it on the next sign-in.
+            FamilyRepository.reset()
+            storedPhotos.value = emptyList()
             _state.update { AppState() }
+        }
+    }
+
+    /**
+     * Re-derive [storedPhotos] from the current visible photo list and write
+     * the JSON file. Called after any mutation that should outlive the process
+     * (likes, comments, album-membership changes, additions, deletions).
+     *
+     * Only photos that came in via [LocalPhotoStore] (i.e. exist in
+     * `storedPhotos.value`) are persisted; demo seed data stays in memory.
+     */
+    private fun persistPhotos() {
+        val knownIds = storedPhotos.value.map { it.id }.toSet()
+        val updatedStored = _state.value.photos
+            .filter { it.id in knownIds }
+            .map(LocalPhotoStore::fromPhoto)
+        storedPhotos.value = updatedStored
+        viewModelScope.launch {
+            LocalPhotoStore.saveAll(getApplication(), updatedStored)
         }
     }
 
@@ -245,6 +320,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 )
             })
         }
+        persistPhotos()
     }
 
     fun addComment(photoId: String, text: String) {
@@ -261,6 +337,28 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 if (p.id != photoId) p else p.copy(comments = p.comments + newComment)
             })
         }
+        persistPhotos()
+    }
+
+    /**
+     * Remove a photo from the album, its bytes from disk, and its metadata row.
+     *
+     * The metadata write goes through the same [persistPhotos] path as likes /
+     * comments / additions — that's the single authoritative writer of
+     * `user_photos.json`. If we did the metadata delete inside
+     * [LocalPhotoStore] (load-modify-save the file independently), it would
+     * race a concurrent like / comment save and one side could resurrect or
+     * drop the other's mutation.
+     */
+    fun deletePhoto(photoId: String) {
+        val target = storedPhotos.value.firstOrNull { it.id == photoId }
+        _state.update { s -> s.copy(photos = s.photos.filterNot { it.id == photoId }) }
+        persistPhotos()
+        if (target != null) {
+            viewModelScope.launch {
+                LocalPhotoStore.deleteFile(target)
+            }
+        }
     }
 
     fun addLocalPhotos(paths: List<String>, caption: String, albumId: String?) {
@@ -276,7 +374,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 authorId = FamilyRepository.currentUserId,
                 createdAtIso = now.toString(),
                 takenOnIso = today.toString(),
-                albumId = albumId,
+                albumIds = listOfNotNull(albumId),
             )
         }
         val newPhotos = newStored.map(LocalPhotoStore::toPhoto)

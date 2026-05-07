@@ -33,7 +33,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -55,12 +57,16 @@ import com.rork.kin.ui.theme.WashiTan
 
 @Composable
 fun CreateJoinFamilyScreen(
-    onCreate: (familyName: String) -> Unit,
-    onJoin: (inviteCode: String) -> Unit,
+    onCreate: suspend (familyName: String) -> String?,
+    onJoin: suspend (inviteCode: String) -> String?,
+    onSuccess: () -> Unit,
 ) {
     var mode by remember { mutableStateOf<Mode?>(null) }
     var familyName by remember { mutableStateOf("") }
     var inviteCode by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    var loading by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     val statusInsets = WindowInsets.statusBars.asPaddingValues()
     val navInsets = WindowInsets.navigationBars.asPaddingValues()
 
@@ -146,24 +152,41 @@ fun CreateJoinFamilyScreen(
                 null -> Unit
             }
 
+            if (error != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    error!!,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFFB35A3D),
+                )
+            }
+
             Spacer(Modifier.weight(1f))
 
-            val canSubmit = when (mode) {
+            val canSubmit = !loading && when (mode) {
                 Mode.Create -> familyName.isNotBlank()
                 Mode.Join -> inviteCode.isNotBlank()
                 null -> false
             }
             KinPrimaryButton(
-                label = when (mode) {
-                    Mode.Join -> "Join family"
-                    Mode.Create -> "Create family"
-                    null -> "Continue"
+                label = when {
+                    loading && mode == Mode.Create -> "Creating…"
+                    loading && mode == Mode.Join -> "Joining…"
+                    mode == Mode.Join -> "Join family"
+                    mode == Mode.Create -> "Create family"
+                    else -> "Continue"
                 },
                 onClick = {
-                    when (mode) {
-                        Mode.Create -> onCreate(familyName)
-                        Mode.Join -> onJoin(inviteCode)
-                        null -> Unit
+                    val m = mode ?: return@KinPrimaryButton
+                    error = null
+                    loading = true
+                    scope.launch {
+                        val msg = when (m) {
+                            Mode.Create -> onCreate(familyName)
+                            Mode.Join -> onJoin(inviteCode)
+                        }
+                        loading = false
+                        if (msg == null) onSuccess() else error = msg
                     }
                 },
                 enabled = canSubmit,

@@ -9,6 +9,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.rork.kin.data.SupabaseAuth
 import com.rork.kin.ui.screens.AlbumDetailScreen
 import com.rork.kin.ui.screens.AuthScreen
 import com.rork.kin.ui.screens.CreateJoinFamilyScreen
@@ -70,12 +71,18 @@ fun AppNavigation() {
             })
         }
         composable(Routes.Auth) {
-            AuthScreen(onContinue = {
-                appVm.signIn()
-                nav.navigate(Routes.Profile) {
-                    popUpTo(Routes.Auth) { inclusive = true }
-                }
-            })
+            AuthScreen(
+                isDevAuthBypass = !SupabaseAuth.isConfigured,
+                submit = { email, password, isSignUp ->
+                    if (isSignUp) appVm.signUpWithPassword(email, password)
+                    else appVm.signInWithPassword(email, password)
+                },
+                onAuthed = {
+                    nav.navigate(Routes.Profile) {
+                        popUpTo(Routes.Auth) { inclusive = true }
+                    }
+                },
+            )
         }
         composable(Routes.Profile) {
             ProfileSetupScreen(onContinue = { name, relationship, avatarUri ->
@@ -87,14 +94,9 @@ fun AppNavigation() {
         }
         composable(Routes.Family) {
             CreateJoinFamilyScreen(
-                onCreate = { familyName ->
-                    appVm.createFamily(familyName)
-                    nav.navigate(Routes.Main) {
-                        popUpTo(Routes.Family) { inclusive = true }
-                    }
-                },
-                onJoin = { code ->
-                    appVm.joinFamily(code)
+                onCreate = { familyName -> appVm.createFamily(familyName) },
+                onJoin = { code -> appVm.joinFamily(code) },
+                onSuccess = {
                     nav.navigate(Routes.Main) {
                         popUpTo(Routes.Family) { inclusive = true }
                     }

@@ -35,6 +35,24 @@ object FamilyRepository {
         createdAt = LocalDate.now(),
     )
 
+    /** Wipe both singletons back to their default placeholders. Called on sign-out. */
+    fun reset() {
+        currentUser = Member(
+            id = GUEST_ID,
+            name = "You",
+            relationship = "",
+            avatarColor = 0xFFC76B4A,
+            initials = "·",
+            role = Role.Admin,
+        )
+        family = Family(
+            id = "fam_pending",
+            name = "Your family",
+            inviteCode = "",
+            createdAt = LocalDate.now(),
+        )
+    }
+
     /**
      * Best-effort lookup. Returns a soft placeholder so the UI never crashes
      * when a member id (e.g. from a remote photo) isn't in the local list yet.

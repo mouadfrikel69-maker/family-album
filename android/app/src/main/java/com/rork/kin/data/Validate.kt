@@ -65,13 +65,27 @@ object Validate {
     }
 
     fun name(raw: String, max: Int = MAX_NAME): String =
-        raw.replace(UNSAFE, "").trim().take(max)
+        truncateCodePoints(raw.replace(UNSAFE, "").trim(), max)
 
     fun caption(raw: String): String =
-        raw.replace(UNSAFE, "").trim().take(MAX_CAPTION)
+        truncateCodePoints(raw.replace(UNSAFE, "").trim(), MAX_CAPTION)
 
     fun comment(raw: String): String =
-        raw.replace(UNSAFE, "").trim().take(MAX_COMMENT)
+        truncateCodePoints(raw.replace(UNSAFE, "").trim(), MAX_COMMENT)
+
+    /**
+     * Truncate by Unicode code points instead of UTF-16 code units, so a 4-byte
+     * emoji at the boundary is never split into a dangling high-surrogate. With
+     * the previous `take(max)` a 60-char name ending in 👨‍👩‍👧 could end as a
+     * lone surrogate that some renderers paint as a tofu glyph.
+     */
+    private fun truncateCodePoints(s: String, maxCodePoints: Int): String {
+        if (s.isEmpty() || maxCodePoints <= 0) return ""
+        val total = s.codePointCount(0, s.length)
+        if (total <= maxCodePoints) return s
+        val cutCharIndex = s.offsetByCodePoints(0, maxCodePoints)
+        return s.substring(0, cutCharIndex)
+    }
 
     fun inviteCode(raw: String): String? {
         val v = raw.trim().uppercase().replace(" ", "")
