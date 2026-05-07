@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.rork.kin.data.Album
 import com.rork.kin.data.AuthRateLimiter
+import com.rork.kin.data.AvatarColor
 import com.rork.kin.data.Comment
 import com.rork.kin.data.Family
 import com.rork.kin.data.FamilyRepository
@@ -42,10 +43,10 @@ data class AppState(
     val notifications: List<Notification> = emptyList(),
 )
 
-private val ACCENT_PALETTE = listOf(
-    0xFFC76B4A, 0xFFE8B4A0, 0xFFD4A574, 0xFF8B7560,
-    0xFFB8C4A8, 0xFFA04E33, 0xFFE2A878, 0xFF7C8C6E,
-)
+// Source of truth for avatar accent colours lives in [AvatarColor] so the
+// remote-member mapper in SupabaseFamily can fall back to the same palette
+// when `family_members.avatar_color` is its default (0L = transparent).
+private val ACCENT_PALETTE: List<Long> get() = AvatarColor.PALETTE
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
 

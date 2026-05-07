@@ -258,23 +258,38 @@ object SupabaseFamily {
             .getOrElse { Result.Error("Network error: ${it::class.simpleName}") }
     }
 
-    private fun MemberRow.toMember(): Member = Member(
-        id = userId,
-        name = displayName.ifBlank { "Family member" },
-        relationship = relationship,
-        avatarColor = avatarColor,
-        initials = initials.ifBlank {
-            displayName
-                .split(" ")
-                .filter { it.isNotBlank() }
-                .take(2)
-                .joinToString("") { it.first().uppercase() }
-                .ifBlank { "·" }
-        },
-        role = when (role.lowercase()) {
-            "admin" -> Role.Admin
-            "viewer" -> Role.Viewer
-            else -> Role.Member
-        },
-    )
+    private fun MemberRow.toMember(): Member {
+        val resolvedName = displayName.ifBlank { "Family member" }
+        // The DB defaults `family_members.avatar_color` to 0 and neither the
+        // creator-trigger nor the join_family RPC sets it, so every fetched
+        // row currently arrives with avatarColor=0L. Compose's Color(0L) is
+        // 0x00000000 — fully transparent — which renders an invisible avatar
+        // circle plus invisible white initials on the cream background.
+        // Fall back to a deterministic palette pick so each member gets a
+        // stable, distinct tint until proper colour persistence lands.
+        val resolvedColor = if (avatarColor != 0L) {
+            avatarColor
+        } else {
+            AvatarColor.colorForSeed(resolvedName.ifBlank { userId })
+        }
+        return Member(
+            id = userId,
+            name = resolvedName,
+            relationship = relationship,
+            avatarColor = resolvedColor,
+            initials = initials.ifBlank {
+                displayName
+                    .split(" ")
+                    .filter { it.isNotBlank() }
+                    .take(2)
+                    .joinToString("") { it.first().uppercase() }
+                    .ifBlank { "·" }
+            },
+            role = when (role.lowercase()) {
+                "admin" -> Role.Admin
+                "viewer" -> Role.Viewer
+                else -> Role.Member
+            },
+        )
+    }
 }
