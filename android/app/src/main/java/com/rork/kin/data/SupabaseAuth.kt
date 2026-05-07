@@ -111,12 +111,17 @@ object SupabaseAuth {
      */
     suspend fun ensureValidSession(ctx: Context): Session? {
         val s = session ?: restore(ctx) ?: return null
-        val expiresAt = s.expiresAt ?: return s
+        // No persisted expiry usually means the session was restored from
+        // pre-update storage or GoTrue omitted both `expires_at` and
+        // `expires_in` on the original grant. Treat it as "unknown — refresh
+        // proactively" rather than "fresh", since a token that's been on disk
+        // for hours is more likely stale than not. Best-effort: if the refresh
+        // call itself fails (no network) keep the existing session so the
+        // 401-retry path in SupabaseFamily.authedRequest can still kick in.
+        val expiresAt = s.expiresAt ?: return refresh(ctx) ?: s
         val nowSec = System.currentTimeMillis() / 1000
         return if (expiresAt - nowSec < PROACTIVE_REFRESH_SEC) {
-            // Best-effort refresh. If the refresh call itself fails (e.g. no
-            // network) keep the stale session so callers can decide what to
-            // do — they'll see the eventual 401 themselves.
+            // Same best-effort contract for the near-expiry path.
             refresh(ctx) ?: s
         } else {
             s
