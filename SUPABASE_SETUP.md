@@ -156,7 +156,11 @@ begin
     new.id,
     new.created_by,
     'admin',
-    coalesce((select email from auth.users where id = new.created_by), ''),
+    -- display_name has a 1..60-character CHECK constraint. If the user has no
+    -- email yet (rare, but possible on some auth providers) fall back to
+    -- 'Member', and clamp the length so a long email doesn't roll back the
+    -- families INSERT either.
+    left(coalesce(nullif((select email from auth.users where id = new.created_by), ''), 'Member'), 60),
     ''
   )
   on conflict (family_id, user_id) do nothing;

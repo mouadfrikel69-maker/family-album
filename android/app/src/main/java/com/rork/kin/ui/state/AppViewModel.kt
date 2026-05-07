@@ -340,15 +340,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         persistPhotos()
     }
 
-    /** Remove a photo from the album, its bytes from disk, and its metadata row. */
+    /**
+     * Remove a photo from the album, its bytes from disk, and its metadata row.
+     *
+     * The metadata write goes through the same [persistPhotos] path as likes /
+     * comments / additions — that's the single authoritative writer of
+     * `user_photos.json`. If we did the metadata delete inside
+     * [LocalPhotoStore] (load-modify-save the file independently), it would
+     * race a concurrent like / comment save and one side could resurrect or
+     * drop the other's mutation.
+     */
     fun deletePhoto(photoId: String) {
         val target = storedPhotos.value.firstOrNull { it.id == photoId }
         _state.update { s -> s.copy(photos = s.photos.filterNot { it.id == photoId }) }
+        persistPhotos()
         if (target != null) {
             viewModelScope.launch {
-                LocalPhotoStore.delete(getApplication(), target)
+                LocalPhotoStore.deleteFile(target)
             }
-            storedPhotos.update { it.filterNot { sp -> sp.id == photoId } }
         }
     }
 

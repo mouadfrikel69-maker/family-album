@@ -6,6 +6,8 @@ import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -48,6 +50,14 @@ object LocalPhotoStore {
     private const val CAPTURE_DIR = "capture"
 
     private val json = Json { ignoreUnknownKeys = true; prettyPrint = false }
+
+    /**
+     * Serialises every read-modify-write on `user_photos.json`. Without it,
+     * concurrent calls (e.g. a like firing while a delete is in flight) race
+     * on the same file and one of the two writes can resurrect a deleted
+     * photo's metadata or drop a fresh like.
+     */
+    private val metaMutex = Mutex()
 
     private fun photosDir(ctx: Context): File =
         File(ctx.filesDir, PHOTOS_DIR).apply { if (!exists()) mkdirs() }
@@ -152,28 +162,32 @@ object LocalPhotoStore {
      * zero-byte / partial JSON.
      */
     suspend fun saveAll(ctx: Context, photos: List<StoredPhoto>) = withContext(Dispatchers.IO) {
-        runCatching {
-            val target = metaFile(ctx)
-            val tmp = File(target.parentFile, target.name + META_TMP_SUFFIX)
-            tmp.writeText(json.encodeToString(photos))
-            // renameTo isn't guaranteed atomic on every fs, but it's close enough
-            // for app-private storage. If it fails, fall back to a copy + delete.
-            if (!tmp.renameTo(target)) {
-                tmp.copyTo(target, overwrite = true)
-                tmp.delete()
-            }
-        }.onFailure { Log.w(TAG, "saveAll failed", it) }
+        metaMutex.withLock {
+            runCatching {
+                val target = metaFile(ctx)
+                val tmp = File(target.parentFile, target.name + META_TMP_SUFFIX)
+                tmp.writeText(json.encodeToString(photos))
+                // renameTo isn't guaranteed atomic on every fs, but it's close enough
+                // for app-private storage. If it fails, fall back to a copy + delete.
+                if (!tmp.renameTo(target)) {
+                    tmp.copyTo(target, overwrite = true)
+                    tmp.delete()
+                }
+            }.onFailure { Log.w(TAG, "saveAll failed", it) }
+        }
         Unit
     }
 
     /**
-     * Remove the photo's bytes **and** its metadata row, then persist. Replaces
-     * the previous bytes-only delete which left a dangling JSON entry.
+     * Delete the photo's bytes from disk. The caller is responsible for
+     * removing the corresponding [StoredPhoto] from the in-memory list and
+     * calling [saveAll] — that way every metadata write goes through a single
+     * authoritative path (the ViewModel's `persistPhotos`) instead of racing
+     * a load-modify-save against concurrent like / comment writes.
      */
-    suspend fun delete(ctx: Context, photo: StoredPhoto) = withContext(Dispatchers.IO) {
+    suspend fun deleteFile(photo: StoredPhoto) = withContext(Dispatchers.IO) {
         runCatching { File(photo.path).delete() }
-        val remaining = loadAll(ctx).filterNot { it.id == photo.id }
-        saveAll(ctx, remaining)
+        Unit
     }
 
     fun toPhoto(s: StoredPhoto): Photo {
