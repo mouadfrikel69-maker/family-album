@@ -33,6 +33,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -60,7 +61,13 @@ fun AlbumDetailScreen(
     val state by appVm.state.collectAsStateWithLifecycle()
     val album = state.albums.firstOrNull { it.id == albumId } ?: return
     val members = state.members
-    val photos = album.photoIds.mapNotNull { pid -> state.photos.firstOrNull { it.id == pid } }
+    // Index by id once so the per-photo lookup below is O(1) instead of O(n).
+    // Without this, an album of 50 photos against a 5K-photo library does
+    // 250K comparisons every recomposition.
+    val photosById = remember(state.photos) { state.photos.associateBy { it.id } }
+    val photos = remember(album.photoIds, photosById) {
+        album.photoIds.mapNotNull(photosById::get)
+    }
     val cover = photos.firstOrNull { it.id == album.coverPhotoId } ?: photos.firstOrNull()
     val statusInsets = WindowInsets.statusBars.asPaddingValues()
     val navInsets = WindowInsets.navigationBars.asPaddingValues()

@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.android.Android
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.headers
 import io.ktor.client.request.post
@@ -50,6 +51,15 @@ object SupabaseAuth {
     private val client by lazy {
         HttpClient(Android) {
             install(ContentNegotiation) { json(this@SupabaseAuth.json) }
+            // Without explicit timeouts a flaky cellular connection can leave
+            // the calling coroutine hanging forever, eventually surfacing as
+            // ANRs on the Main thread. 10 s connect / 30 s request matches
+            // what most mobile clients use against Supabase.
+            install(HttpTimeout) {
+                connectTimeoutMillis = 10_000
+                requestTimeoutMillis = 30_000
+                socketTimeoutMillis = 30_000
+            }
         }
     }
 
@@ -87,10 +97,33 @@ object SupabaseAuth {
         val refresh = SecureStore.get(ctx, SecureStore.KEY_REFRESH_TOKEN) ?: return@withContext null
         val uid = SecureStore.get(ctx, SecureStore.KEY_USER_ID) ?: return@withContext null
         val email = SecureStore.get(ctx, SecureStore.KEY_USER_EMAIL)
-        val s = Session(access, refresh, AuthUser(uid, email))
+        val expiresAtSec = SecureStore.get(ctx, SecureStore.KEY_EXPIRES_AT)?.toLongOrNull()
+        val s = Session(access, refresh, AuthUser(uid, email), expiresAtSec)
         session = s
         s
     }
+
+    /**
+     * Return the current session, refreshing it first if it is missing an
+     * expiry, expired, or about to expire (less than [PROACTIVE_REFRESH_SEC]
+     * seconds remaining). Used by every authed request so a stale token
+     * never reaches PostgREST and gets bounced with a 401.
+     */
+    suspend fun ensureValidSession(ctx: Context): Session? {
+        val s = session ?: restore(ctx) ?: return null
+        val expiresAt = s.expiresAt ?: return s
+        val nowSec = System.currentTimeMillis() / 1000
+        return if (expiresAt - nowSec < PROACTIVE_REFRESH_SEC) {
+            // Best-effort refresh. If the refresh call itself fails (e.g. no
+            // network) keep the stale session so callers can decide what to
+            // do — they'll see the eventual 401 themselves.
+            refresh(ctx) ?: s
+        } else {
+            s
+        }
+    }
+
+    private const val PROACTIVE_REFRESH_SEC = 60L
 
     suspend fun signUp(ctx: Context, email: String, password: String): AuthResult =
         post(ctx, "/auth/v1/signup", email, password)
@@ -149,7 +182,9 @@ object SupabaseAuth {
                     explainAuthError(res.status.value, body, isSignUp),
                 )
             }
-            val s = json.decodeFromString<Session>(res.bodyAsText())
+            val raw = res.bodyAsText()
+            val parsed = json.decodeFromString<Session>(raw)
+            val s = parsed.copy(expiresAt = parsed.expiresAt ?: deriveExpiresAt(raw))
             persist(ctx, s)
             session = s
             AuthResult.Ok(s)
@@ -168,11 +203,29 @@ object SupabaseAuth {
                 setBody(RefreshBody(current.refreshToken))
             }
             if (!res.status.isSuccess()) return@runCatching null
-            val s = json.decodeFromString<Session>(res.bodyAsText())
+            val raw = res.bodyAsText()
+            val parsed = json.decodeFromString<Session>(raw)
+            // GoTrue's refresh response normally includes `expires_at`, but if
+            // it's ever absent fall back to deriving it from `expires_in` so
+            // the proactive-refresh path is uniform across grant types.
+            val s = parsed.copy(expiresAt = parsed.expiresAt ?: deriveExpiresAt(raw))
             persist(ctx, s)
             session = s
             s
         }.getOrNull()
+    }
+
+    @Serializable
+    private data class ExpiresInBody(@SerialName("expires_in") val expiresIn: Long? = null)
+
+    /**
+     * Some GoTrue versions only echo `expires_in` (relative seconds). Convert
+     * to an absolute `expires_at` so the proactive-refresh check is uniform.
+     */
+    private fun deriveExpiresAt(body: String): Long? {
+        val expiresIn = runCatching { json.decodeFromString<ExpiresInBody>(body).expiresIn }
+            .getOrNull() ?: return null
+        return System.currentTimeMillis() / 1000 + expiresIn
     }
 
     suspend fun signOut(ctx: Context) {
@@ -182,6 +235,7 @@ object SupabaseAuth {
         SecureStore.put(ctx, SecureStore.KEY_REFRESH_TOKEN, null)
         SecureStore.put(ctx, SecureStore.KEY_USER_ID, null)
         SecureStore.put(ctx, SecureStore.KEY_USER_EMAIL, null)
+        SecureStore.put(ctx, SecureStore.KEY_EXPIRES_AT, null)
         if (!isConfigured || token.isNullOrBlank()) return
         runCatching {
             client.post("$baseUrl/auth/v1/logout") {
@@ -198,6 +252,7 @@ object SupabaseAuth {
         SecureStore.put(ctx, SecureStore.KEY_REFRESH_TOKEN, s.refreshToken)
         SecureStore.put(ctx, SecureStore.KEY_USER_ID, s.user.id)
         SecureStore.put(ctx, SecureStore.KEY_USER_EMAIL, s.user.email)
+        SecureStore.put(ctx, SecureStore.KEY_EXPIRES_AT, s.expiresAt?.toString())
     }
 
     /** Bearer token to use for PostgREST/Storage requests, falling back to anon. */

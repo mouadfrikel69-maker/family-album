@@ -40,6 +40,7 @@ object SecureStore {
     const val KEY_PROFILE_REL = "profile_relationship"
     const val KEY_PROFILE_INITIALS = "profile_initials"
     const val KEY_PROFILE_COLOR = "profile_color"
+    const val KEY_EXPIRES_AT = "expires_at"
 
     @Volatile private var prefs: SharedPreferences? = null
     // Coroutines from Dispatchers.IO read/write SecureStore concurrently. The
