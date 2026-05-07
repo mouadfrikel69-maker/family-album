@@ -270,7 +270,11 @@ object SupabaseFamily {
         val resolvedColor = if (avatarColor != 0L) {
             avatarColor
         } else {
-            AvatarColor.colorForSeed(resolvedName.ifBlank { userId })
+            // Seed off the raw `displayName` (still possibly blank) so an
+            // empty/null name on the server falls through to `userId`,
+            // giving each user without a display name a *distinct* tint
+            // instead of every blank-name member sharing the same colour.
+            AvatarColor.colorForSeed(displayName.ifBlank { userId })
         }
         return Member(
             id = userId,
